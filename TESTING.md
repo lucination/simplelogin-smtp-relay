@@ -31,6 +31,53 @@ test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 Covers: SMTP AUTH LOGIN/PLAIN decoding & credential validation, env var parsing/defaults/validation (matching the Python original's names and defaults), header address parsing/replacement (`To`/`Cc` rewriting, display-name preservation, unmapped-address passthrough), and `Bcc` stripping.
 
+## Docker image testing
+
+Build and smoke-test both Dockerfile variants:
+
+```bash
+docker build -t simplelogin-smtp-relay:latest .
+docker build -f Dockerfile.alpine -t simplelogin-smtp-relay:alpine .
+
+# confirm the alpine binary only depends on musl libc (no libssl/libcrypto,
+# since openssl-sys `vendored` statically links OpenSSL):
+docker run --rm --entrypoint sh simplelogin-smtp-relay:alpine -c 'ldd /app/smtp-relay || true'
+```
+
+Real output from this repo:
+
+```
+$ docker run --rm --entrypoint sh simplelogin-smtp-relay:alpine -c 'ldd /app/smtp-relay || true'
+        /lib/ld-musl-x86_64.so.1 (0x...)
+```
+
+### Healthcheck
+
+Run a container and confirm `--healthcheck` and the Docker `HEALTHCHECK` both report healthy once the relay is listening:
+
+```bash
+docker run -d --name relay-test -p 18025:8025 \
+  -e RELAY_USERNAME=u -e RELAY_PASSWORD=p -e SL_API_KEY=k \
+  -e UPSTREAM_USERNAME=u -e UPSTREAM_PASSWORD=p \
+  simplelogin-smtp-relay:alpine
+
+docker exec relay-test /app/smtp-relay --healthcheck; echo $?   # expect 0
+docker inspect --format='{{json .State.Health}}' relay-test    # expect "Status":"healthy" after start_period
+```
+
+Real result from this repo: `--healthcheck` exits `0` immediately once the listener is up, and `docker inspect` reports `{"Status":"healthy", ...}` after the 10s `start_period`.
+
+### Multi-arch builds
+
+CI (`.github/workflows/ci.yml`) uses `docker/setup-qemu-action` + `docker/setup-buildx-action` + `docker/build-push-action` with `platforms: linux/amd64,linux/arm64` to build and push both Dockerfiles for both architectures to GHCR. To reproduce locally (requires QEMU binfmt registration, e.g. `docker run --privileged --rm tonistiigi/binfmt --install all`):
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile .
+docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.alpine .
+```
+
+Note: local `arm64` builds run under QEMU emulation and are significantly slower (often 10-20+ minutes) than the native runners GitHub Actions uses; treat a full local multi-arch build as optional verification, and check the Actions run for the authoritative result.
+
 ## Differential parity harness
 
 `tests/differential/run.py` is a **live** parity test: it clones the actual [Hoshinowo-Yuki/simple-login-smtp-relay](https://github.com/Hoshinowo-Yuki/simple-login-smtp-relay) Python original into `.differential-original/`, spins up an in-process mock SimpleLogin API and a mock upstream SMTP server, then runs identical SMTP scenarios through **both** the Python original (`server.py`) and the Rust binary (`target/debug/smtp-relay`), and diffs:

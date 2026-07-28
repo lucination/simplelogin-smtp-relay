@@ -1,6 +1,8 @@
 services:
   smtp-relay:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: simplelogin-smtp-relay:latest
     container_name: simplelogin-smtp-relay
     restart: unless-stopped
@@ -11,3 +13,33 @@ services:
     environment:
       RELAY_HOST: 0.0.0.0
       RELAY_PORT: 8025
+    healthcheck:
+      test: ["CMD", "/app/smtp-relay", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Alpine/musl variant of the same service. Same image, smaller footprint.
+  # Not started by default; run with `docker compose --profile alpine up smtp-relay-alpine`.
+  smtp-relay-alpine:
+    profiles: ["alpine"]
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+    image: simplelogin-smtp-relay:alpine
+    container_name: simplelogin-smtp-relay-alpine
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+    env_file:
+      - .env
+    environment:
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 8025
+    healthcheck:
+      test: ["CMD", "/app/smtp-relay", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

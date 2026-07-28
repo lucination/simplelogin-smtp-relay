@@ -1,0 +1,33 @@
+# --- build stage ---
+# musl target so the final binary needs no glibc. native-tls (wraps
+# openssl-sys) is used for STARTTLS both server- and client-side; on musl
+# we use openssl-sys's `vendored` feature (already enabled in Cargo.toml)
+# which builds and statically links OpenSSL from source instead of relying
+# on system dev headers/libs, avoiding musl/openssl-sys dynamic-linking pain.
+FROM rust:1-alpine AS builder
+WORKDIR /build
+
+RUN apk add --no-cache musl-dev perl make gcc pkgconfig openssl-dev
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked
+
+# --- runtime stage ---
+FROM alpine:latest
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S relay && adduser -S -u 10001 -G relay relay
+
+COPY --from=builder /build/target/release/smtp-relay /app/smtp-relay
+
+USER relay
+EXPOSE 8025
+
+# Built-in healthcheck: the binary itself connects to its own listener and
+# checks for an SMTP "2xx" greeting banner (see `--healthcheck` in main.rs).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/app/smtp-relay", "--healthcheck"]
+
+ENTRYPOINT ["/app/smtp-relay"]

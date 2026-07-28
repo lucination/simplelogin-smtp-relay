@@ -53,6 +53,55 @@ UPSTREAM_USERNAME=you@gmail.com UPSTREAM_PASSWORD=app-password \
 
 Or via Docker — see `Dockerfile` / `docker-compose.yml`.
 
+### Docker images
+
+Two Dockerfiles are provided:
+
+| File | Base | libc | When to use |
+|---|---|---|---|
+| `Dockerfile` | `debian:bookworm-slim` | glibc | Default; smallest maintenance surface, well-trodden path |
+| `Dockerfile.alpine` | `alpine:latest` | musl | Smaller image, musl-based hosts/orchestrators, or when a minimal attack surface matters more than glibc compatibility |
+
+Both produce the same `smtp-relay` binary and behave identically. TLS (server-side `STARTTLS` and the client connection to upstream) is handled by `native-tls`; on the Alpine/musl build this uses openssl-sys's `vendored` feature (statically links a from-source OpenSSL build) so there's no dependency on musl-libc's OpenSSL packaging or dynamic linking against `libssl`/`libcrypto` at runtime — confirmed via `ldd` showing only `ld-musl-x86_64.so.1` linked, no `libssl`/`libcrypto`.
+
+Build locally:
+
+```bash
+docker build -t simplelogin-smtp-relay:latest .
+docker build -f Dockerfile.alpine -t simplelogin-smtp-relay:alpine .
+```
+
+Or via compose (the alpine variant is behind the `alpine` profile):
+
+```bash
+docker compose up smtp-relay                          # debian/glibc
+docker compose --profile alpine up smtp-relay-alpine   # alpine/musl
+```
+
+### Published images (multi-arch)
+
+CI builds and pushes both variants to GHCR for `linux/amd64` and `linux/arm64` on every push to `main`:
+
+- `ghcr.io/lucination/simplelogin-smtp-relay:latest` — debian/glibc, multi-arch
+- `ghcr.io/lucination/simplelogin-smtp-relay:alpine` — alpine/musl, multi-arch
+- `ghcr.io/lucination/simplelogin-smtp-relay:<git-sha>` / `:<git-sha>-alpine` — immutable per-commit tags
+
+```bash
+docker pull ghcr.io/lucination/simplelogin-smtp-relay:latest
+docker pull ghcr.io/lucination/simplelogin-smtp-relay:alpine
+```
+
+### Healthcheck
+
+Both images ship a `HEALTHCHECK` that invokes the binary itself in a lightweight self-check mode (`smtp-relay --healthcheck`) rather than requiring `curl`/`nc` in the image: it opens a TCP connection to `127.0.0.1:${RELAY_PORT:-8025}`, reads the SMTP greeting, and exits `0` if it starts with `2` (e.g. `220 ...`) or `1` otherwise. `docker-compose.yml` wires the same command into each service's `healthcheck:` block.
+
+Test manually:
+
+```bash
+docker exec <container> /app/smtp-relay --healthcheck; echo $?   # 0 = healthy
+docker inspect --format='{{json .State.Health}}' <container>
+```
+
 ## Testing
 
 See [`TESTING.md`](TESTING.md) for `cargo test` instructions and how to run the differential parity harness against a live clone of the Python original. Any intentional, unavoidable behavioral divergence discovered by that harness is documented in [`KNOWN_DIFFERENCES.md`](KNOWN_DIFFERENCES.md).

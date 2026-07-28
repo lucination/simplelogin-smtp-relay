@@ -13,7 +13,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 tokio-native-tls = "0.3"
-native-tls = "0.2"
+native-tls = { version = "0.2", features = ["vendored"] }
 rustls = "0.23"
 rustls-pemfile = "2"
 reqwest = { version = "0.12", features = ["json", "blocking"] }

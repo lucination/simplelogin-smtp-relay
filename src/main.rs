@@ -15,6 +15,9 @@ use tokio_native_tls::TlsAcceptor;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|a| a == "--healthcheck") {
+        std::process::exit(healthcheck());
+    }
     let config = Config::from_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&config.log_level))
         .init();
@@ -93,6 +96,39 @@ async fn main() {
         }
     }
     log::info!("Shutdown complete");
+}
+
+/// Standalone healthcheck mode: connects to the relay's own listener
+/// (127.0.0.1:$RELAY_PORT, default 8025) and confirms it responds with an
+/// SMTP "2xx" greeting banner. Intended for `HEALTHCHECK CMD ["/app/smtp-relay", "--healthcheck"]`
+/// in Docker so the image needs no extra tools (nc, bash /dev/tcp, etc).
+/// Returns a process exit code: 0 = healthy, 1 = unhealthy.
+fn healthcheck() -> i32 {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let port = std::env::var("RELAY_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(8025);
+    let addr = format!("127.0.0.1:{port}");
+
+    let mut stream = match TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(_) => return 1,
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .is_err()
+    {
+        return 1;
+    }
+    let mut buf = [0u8; 8];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 && buf[0] == b'2' => 0,
+        _ => 1,
+    }
 }
 
 fn load_tls(c: &Config) -> anyhow::Result<TlsAcceptor> {
