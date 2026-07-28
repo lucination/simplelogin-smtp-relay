@@ -1,6 +1,14 @@
 # Known Differences from the Python Original
 
-Goal: zero unintentional behavioral differences. This file lists the one genuine, unavoidable divergence found by the differential test harness (`tests/differential/run.py`), along with root cause and rationale for not "fixing" it away.
+Goal: zero unintentional behavioral differences. This file lists deliberate divergences from the Python original.
+
+## Upstream envelope sender
+
+The relay always uses `UPSTREAM_USERNAME` as the upstream SMTP `MAIL FROM`
+identity. The RFC 5322 message headers, including `From`, are not changed.
+
+This deliberately differs from the reference implementation, which forwards
+the inbound envelope sender upstream.
 
 ## `DATA_TIMEOUT` enforcement under a slow-but-completing upstream
 

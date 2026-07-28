@@ -9,14 +9,18 @@ cargo test
 Current result (real output from this repo, re-run on every change):
 
 ```
-running 15 tests
+running 17 tests
 test auth::tests::login_success_and_failure ... ok
 test auth::tests::plain_success_and_failure ... ok
 test config::tests::defaults_match_python ... ok
+
 test config::tests::missing_required_vars_reported ... ok
 test config::tests::tls_enabled_requires_cert_and_key ... ok
+
 test config::tests::valid_config_passes ... ok
 test handler::tests::bcc_is_stripped_to_and_cc_rewritten ... ok
+test handler::tests::upstream_envelope_sender_uses_authenticated_identity_and_preserves_from_header ... ok
+test handler::tests::upstream_rejection_is_a_sanitized_single_line_451_response ... ok
 test mail::tests::display_name_preserved ... ok
 test mail::tests::empty_header_yields_empty_string ... ok
 test mail::tests::multiple_to_all_replaced ... ok
@@ -26,10 +30,10 @@ test mail::tests::single_to_replaced ... ok
 test mail::tests::unmapped_address_left_alone ... ok
 test mail::tests::unmapped_with_display_name_left_alone ... ok
 
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-Covers: SMTP AUTH LOGIN/PLAIN decoding & credential validation, env var parsing/defaults/validation (matching the Python original's names and defaults), header address parsing/replacement (`To`/`Cc` rewriting, display-name preservation, unmapped-address passthrough), and `Bcc` stripping.
+Covers: SMTP AUTH LOGIN/PLAIN decoding & credential validation; env parsing/defaults/validation; header address parsing/replacement (`To`/`Cc` rewriting, display-name preservation, unmapped-address passthrough), and `Bcc` stripping; mock-upstream verification that the upstream authenticated identity is used as the envelope sender while the RFC 5322 `From` header remains unchanged; and sanitized single-line upstream SMTP error responses.
 
 ## Docker image testing
 

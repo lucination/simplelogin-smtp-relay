@@ -12,8 +12,8 @@ All credit for the original design, protocol behavior, and API usage pattern goe
    - `POST /api/aliases/{id}/contacts {"contact": recipient}` to obtain the `reverse_alias` for that recipient.
 3. Rewrites the `To`/`Cc` headers to use the reverse-alias addresses, preserving the original display names. Addresses with no known reverse alias are left untouched.
 4. Strips any `Bcc` header before relaying (envelope recipients already carry the real destinations).
-5. Relays the rewritten message upstream over SMTP (`STARTTLS` + `AUTH LOGIN` + `MAIL FROM`/`RCPT TO`/`DATA`), defaulting to `smtp.gmail.com:587`.
-6. The whole `DATA` processing path is wrapped in a `DATA_TIMEOUT`; on timeout it replies `451 Timeout processing mail`, on other failures `451 Internal error`, and `250 OK` on success.
+5. Relays the rewritten message upstream over SMTP (`STARTTLS` + `AUTH LOGIN` + `MAIL FROM`/`RCPT TO`/`DATA`), defaulting to `smtp.gmail.com:587`. The upstream envelope sender is always `UPSTREAM_USERNAME`; RFC 5322 message headers remain unchanged.
+6. The whole `DATA` processing path is wrapped in a `DATA_TIMEOUT`; on timeout it replies `451 Timeout processing mail`, upstream SMTP failures return a sanitized single-line `451 Upstream SMTP error` diagnostic when a numeric response is available, other failures return `451 Internal error`, and success returns `250 OK`.
 
 ## Configuration
 
@@ -35,6 +35,7 @@ Same environment variable names and defaults as the Python original:
 | `UPSTREAM_USERNAME` | *(required)* | Upstream SMTP AUTH username |
 | `UPSTREAM_PASSWORD` | *(required)* | Upstream SMTP AUTH password |
 | `UPSTREAM_STARTTLS` | `true` | Use `STARTTLS` against the upstream |
+
 | `UPSTREAM_TIMEOUT` | `15` | Seconds, upstream SMTP connection/IO timeout |
 | `DATA_TIMEOUT` | `30` | Seconds, timeout wrapping the whole `DATA` processing path |
 | `LOG_LEVEL` | `INFO` | `env_logger` level |

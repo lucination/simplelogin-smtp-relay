@@ -35,6 +35,14 @@ impl RelayHandler {
         {
             Ok(Ok(())) => "250 OK".to_string(),
             Ok(Err(e)) => {
+                if let Some(diagnostic) = e
+                    .chain()
+                    .map(ToString::to_string)
+                    .find(|message| message.starts_with("Upstream SMTP error"))
+                {
+                    log::error!("{diagnostic}");
+                    return format!("451 {diagnostic}");
+                }
                 log::error!("Unexpected error: {e:#}");
                 "451 Internal error".to_string()
             }
@@ -119,6 +127,63 @@ pub fn rewrite_message(data: &[u8], alias_map: &HashMap<String, String>) -> Vec<
     out.into_bytes()
 }
 
+fn upstream_error_response(raw_response: &str) -> String {
+    let compact: String = raw_response
+        .chars()
+        .map(|character| {
+            if character.is_ascii_graphic() || character == ' ' {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut words = compact.split_whitespace();
+    let code = words
+        .next()
+        .filter(|word| word.len() == 3 && word.as_bytes().iter().all(u8::is_ascii_digit));
+    let lower = compact.to_ascii_lowercase();
+    let enhanced_status = words.clone().find(|word| {
+        let mut parts = word.split('.');
+        parts.clone().count() == 3
+            && parts.all(|part| !part.is_empty() && part.as_bytes().iter().all(u8::is_ascii_digit))
+    });
+    // Keep only a fixed category, rather than echoing arbitrary server text:
+    // upstream responses may be untrusted and must not disclose message data
+    // or credentials to the SMTP client.
+    let category = if lower.contains("sender") || lower.contains("mail from") {
+        Some("sender rejected")
+    } else if lower.contains("recipient") || lower.contains("rcpt to") {
+        Some("recipient rejected")
+    } else if lower.contains("message") || lower.contains("data") {
+        Some("message rejected")
+    } else {
+        None
+    };
+    let message = match code {
+        Some(code) => [Some(code), enhanced_status, category]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => String::new(),
+    };
+    if message.is_empty() {
+        "451 Upstream SMTP error".to_string()
+    } else {
+        format!("451 Upstream SMTP error: {message}")
+    }
+}
+
+fn upstream_error(raw_response: &str) -> anyhow::Error {
+    anyhow!(upstream_error_response(raw_response)
+        .trim_start_matches("451 ")
+        .to_string())
+}
+
 async fn read_line<S: AsyncRead + Unpin>(s: &mut S) -> Result<String> {
     let mut out = Vec::new();
     let mut b = [0u8; 1];
@@ -159,7 +224,7 @@ async fn cmd<S: AsyncRead + AsyncWrite + Unpin>(
     s.flush().await?;
     let line = read_response(s).await?;
     if !line.starts_with(want) {
-        return Err(anyhow!("upstream {} -> {}", text, line));
+        return Err(upstream_error(&line));
     }
     Ok(line)
 }
@@ -168,7 +233,7 @@ async fn expect<S: AsyncRead + Unpin>(s: &mut S, want: char) -> Result<()> {
     if l.starts_with(want) {
         Ok(())
     } else {
-        Err(anyhow!("upstream greeting/response: {l}"))
+        Err(upstream_error(&l))
     }
 }
 
@@ -229,10 +294,13 @@ async fn smtp_send<S: AsyncRead + AsyncWrite + Unpin>(
 
 pub async fn send_upstream(
     c: &Config,
-    mail_from: &str,
+    _mail_from: &str,
     rcpts: &[String],
     data: &[u8],
 ) -> Result<()> {
+    // The upstream envelope sender is the authenticated identity. `data` is
+    // passed through unchanged here, so its RFC 5322 From header is never rewritten.
+    let upstream_from = c.upstream_username.as_deref().unwrap();
     let tcp = tokio::time::timeout(
         Duration::from_secs(c.upstream_timeout),
         TcpStream::connect((c.upstream_host.as_str(), c.upstream_port)),
@@ -253,7 +321,7 @@ pub async fn send_upstream(
         let mut s = tls;
         cmd(&mut s, "EHLO localhost", '2').await?;
         smtp_auth(&mut s, c).await?;
-        cmd(&mut s, &format!("MAIL FROM:<{}>", mail_from), '2').await?;
+        cmd(&mut s, &format!("MAIL FROM:<{}>", upstream_from), '2').await?;
         for r in rcpts {
             cmd(&mut s, &format!("RCPT TO:<{}>", r), '2').await?;
         }
@@ -262,13 +330,116 @@ pub async fn send_upstream(
         Ok(())
     } else {
         let mut s = tcp;
-        smtp_send(&mut s, c, mail_from, rcpts, data).await
+        smtp_send(&mut s, c, upstream_from, rcpts, data).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upstream_rejection_is_a_sanitized_single_line_451_response() {
+        let response = upstream_error_response(
+            "501 5.5.4 sender rejected\r\n250 injected response token=not-for-clients",
+        );
+        assert_eq!(
+            response,
+            "451 Upstream SMTP error: 501 5.5.4 sender rejected"
+        );
+        assert!(!response.contains('\r'));
+        assert!(!response.contains('\n'));
+        assert!(!response.contains("injected"));
+        assert!(!response.contains("not-for-clients"));
+    }
+
+    #[tokio::test]
+    async fn upstream_envelope_sender_uses_authenticated_identity_and_preserves_from_header() {
+        async fn capture_upstream() -> (String, String) {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use tokio::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                writer.write_all(b"220 mock\r\n").await.unwrap();
+                writer.flush().await.unwrap();
+                let mut envelope = String::new();
+                let mut message = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line.starts_with("EHLO") {
+                        writer.write_all(b"250 mock\r\n").await.unwrap();
+                    } else if line.starts_with("AUTH LOGIN") {
+                        writer.write_all(b"334 username\r\n").await.unwrap();
+                    } else if line.trim() == "cA==" {
+                        writer.write_all(b"235 authenticated\r\n").await.unwrap();
+                    } else if line.starts_with("MAIL FROM:") {
+                        envelope = line.trim().to_string();
+                        writer.write_all(b"250 sender accepted\r\n").await.unwrap();
+                    } else if line.starts_with("RCPT TO:") {
+                        writer
+                            .write_all(b"250 recipient accepted\r\n")
+                            .await
+                            .unwrap();
+                    } else if line.trim() == "DATA" {
+                        writer.write_all(b"354 continue\r\n").await.unwrap();
+                        loop {
+                            line.clear();
+                            reader.read_line(&mut line).await.unwrap();
+                            if line == ".\r\n" {
+                                break;
+                            }
+                            message.push_str(&line);
+                        }
+                        writer.write_all(b"250 queued\r\n").await.unwrap();
+                    } else if line.trim() == "QUIT" {
+                        writer.write_all(b"221 bye\r\n").await.unwrap();
+                        writer.flush().await.unwrap();
+                        return (envelope, message);
+                    }
+                    writer.flush().await.unwrap();
+                }
+            });
+            let config = Config {
+                relay_host: "127.0.0.1".into(),
+                relay_port: 0,
+                relay_username: Some("relay".into()),
+                relay_password: Some("secret".into()),
+                tls_enabled: false,
+                tls_cert: String::new(),
+                tls_key: String::new(),
+                sl_api_url: "http://localhost".into(),
+                sl_api_key: Some("key".into()),
+                upstream_host: "127.0.0.1".into(),
+                upstream_port: port,
+                upstream_username: Some("u".into()),
+                upstream_password: Some("p".into()),
+                upstream_starttls: false,
+                data_timeout: 30,
+                upstream_timeout: 5,
+                log_level: "ERROR".into(),
+            };
+            send_upstream(
+                &config,
+                "source@example.test",
+                &["recipient@example.test".into()],
+                b"From: source@example.test\r\nTo: recipient@example.test\r\n\r\nBody\r\n",
+            )
+            .await
+            .unwrap();
+            server.await.unwrap()
+        }
+
+        let (envelope, message) = capture_upstream().await;
+        assert_eq!(envelope, "MAIL FROM:<u>");
+        assert!(message.contains("From: source@example.test"));
+    }
+
     #[test]
     fn bcc_is_stripped_to_and_cc_rewritten() {
         let mut m = HashMap::new();
