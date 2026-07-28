@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::mail::{parse_single_addr, replace_addresses};
+use crate::mail::{normalize_from_address, parse_single_addr, replace_addresses};
 use crate::simplelogin_client::SimpleLoginClient;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -73,7 +73,11 @@ fn process_sync(
         new_rcpts.push(parse_single_addr(&reverse).1);
         alias_map.insert(rcpt.clone(), reverse);
     }
-    let rewritten = rewrite_message(data, &alias_map);
+    let rewritten = rewrite_message(
+        data,
+        &alias_map,
+        config.upstream_username.as_deref().unwrap(),
+    );
     // original is blocking smtplib SMTP with timeout=UPSTREAM_TIMEOUT.
     let rt = tokio::runtime::Handle::current();
     rt.block_on(send_upstream(&config, mail_from, &new_rcpts, &rewritten))?;
@@ -81,11 +85,15 @@ fn process_sync(
     Ok(())
 }
 
-/// Mutate only To/Cc/Bcc headers as Python's email.message_from_bytes +
-/// header deletion/reassignment does for normal RFC-5322 messages. Output
-/// line normalization deliberately retains original header/body bytes except
-/// the changed header fields; tests compare semantic captured headers.
-pub fn rewrite_message(data: &[u8], alias_map: &HashMap<String, String>) -> Vec<u8> {
+/// Mutate To/Cc/Bcc headers and normalize each parseable From mailbox to the
+/// authenticated upstream identity. No From header is added; malformed or
+/// non-mailbox From fields are retained unchanged. Output line normalization
+/// deliberately retains original header/body bytes except changed fields.
+pub fn rewrite_message(
+    data: &[u8],
+    alias_map: &HashMap<String, String>,
+    upstream_username: &str,
+) -> Vec<u8> {
     let text = String::from_utf8_lossy(data);
     let (head, body, sep) = if let Some(i) = text.find("\r\n\r\n") {
         (&text[..i], &text[i + 4..], "\r\n\r\n")
@@ -111,6 +119,11 @@ pub fn rewrite_message(data: &[u8], alias_map: &HashMap<String, String>) -> Vec<
         }
         if name.eq_ignore_ascii_case("To") || name.eq_ignore_ascii_case("Cc") {
             out_fields.push((name, replace_addresses(&value, alias_map)));
+        } else if name.eq_ignore_ascii_case("From") {
+            out_fields.push((
+                name,
+                normalize_from_address(&value, upstream_username).unwrap_or(value),
+            ));
         } else {
             out_fields.push((name, value));
         }
@@ -352,9 +365,50 @@ mod tests {
         assert!(!response.contains("not-for-clients"));
     }
 
-    #[tokio::test]
-    async fn upstream_envelope_sender_uses_authenticated_identity_and_preserves_from_header() {
-        async fn capture_upstream() -> (String, String) {
+    #[test]
+    fn preserves_inbound_sender_for_reverse_alias_lookup_and_rewrites_final_upstream_identities() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener as StdTcpListener;
+        use std::sync::mpsc;
+
+        fn capture_simplelogin_api() -> (u16, mpsc::Receiver<String>) {
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (requests_tx, requests_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).unwrap();
+                    while {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        line != "\r\n"
+                    } {}
+                    requests_tx.send(request_line.clone()).unwrap();
+                    let mut writer = stream;
+                    let body = if request_line.starts_with("GET ") {
+                        r#"{"aliases":[{"id":7,"email":"original@app.example.test"}]}"#
+                    } else {
+                        r#"{"reverse_alias":"reverse@simplelogin.example.test"}"#
+                    };
+                    write!(
+                        writer,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                    writer.flush().unwrap();
+                }
+            });
+            (port, requests_rx)
+        }
+
+        async fn capture_upstream() -> (u16, tokio::task::JoinHandle<(String, String)>) {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
             use tokio::net::TcpListener;
 
@@ -369,14 +423,17 @@ mod tests {
                 writer.flush().await.unwrap();
                 let mut envelope = String::new();
                 let mut message = String::new();
+                let mut auth_step = 0;
                 loop {
                     line.clear();
                     reader.read_line(&mut line).await.unwrap();
                     if line.starts_with("EHLO") {
                         writer.write_all(b"250 mock\r\n").await.unwrap();
                     } else if line.starts_with("AUTH LOGIN") {
-                        writer.write_all(b"334 username\r\n").await.unwrap();
-                    } else if line.trim() == "cA==" {
+                        auth_step = 1;
+                        writer.write_all(b"334 password\r\n").await.unwrap();
+                    } else if auth_step == 1 {
+                        auth_step = 0;
                         writer.write_all(b"235 authenticated\r\n").await.unwrap();
                     } else if line.starts_with("MAIL FROM:") {
                         envelope = line.trim().to_string();
@@ -405,39 +462,82 @@ mod tests {
                     writer.flush().await.unwrap();
                 }
             });
-            let config = Config {
-                relay_host: "127.0.0.1".into(),
-                relay_port: 0,
-                relay_username: Some("relay".into()),
-                relay_password: Some("secret".into()),
-                tls_enabled: false,
-                tls_cert: String::new(),
-                tls_key: String::new(),
-                sl_api_url: "http://localhost".into(),
-                sl_api_key: Some("key".into()),
-                upstream_host: "127.0.0.1".into(),
-                upstream_port: port,
-                upstream_username: Some("u".into()),
-                upstream_password: Some("p".into()),
-                upstream_starttls: false,
-                data_timeout: 30,
-                upstream_timeout: 5,
-                log_level: "ERROR".into(),
-            };
-            send_upstream(
-                &config,
-                "source@example.test",
-                &["recipient@example.test".into()],
-                b"From: source@example.test\r\nTo: recipient@example.test\r\n\r\nBody\r\n",
-            )
-            .await
-            .unwrap();
-            server.await.unwrap()
+            (port, server)
         }
 
-        let (envelope, message) = capture_upstream().await;
-        assert_eq!(envelope, "MAIL FROM:<u>");
-        assert!(message.contains("From: source@example.test"));
+        let (api_port, api_requests) = capture_simplelogin_api();
+        let (upstream_port, upstream) = capture_upstream().await;
+        let config = Config {
+            relay_host: "127.0.0.1".into(),
+            relay_port: 0,
+            relay_username: Some("relay".into()),
+            relay_password: Some("relay-pass".into()),
+            tls_enabled: false,
+            tls_cert: String::new(),
+            tls_key: String::new(),
+            sl_api_url: format!("http://127.0.0.1:{api_port}"),
+            sl_api_key: Some("test-key".into()),
+            upstream_host: "127.0.0.1".into(),
+            upstream_port,
+            upstream_username: Some("upstream@example.test".into()),
+            upstream_password: Some("upstream-pass".into()),
+            upstream_starttls: false,
+            data_timeout: 30,
+            upstream_timeout: 5,
+            log_level: "ERROR".into(),
+        };
+        let sl_url = config.sl_api_url.clone();
+        let sl = std::thread::spawn(move || SimpleLoginClient::new(&sl_url, "test-key"))
+            .join()
+            .unwrap()
+            .unwrap();
+        // reqwest's blocking client owns an internal runtime; retain it until
+        // process exit so it is never dropped while this async test is polling.
+        let sl = Box::leak(Box::new(Arc::new(sl))).clone();
+        let handler = RelayHandler::new(config, sl);
+        let response = handler
+            .process(
+                "original@app.example.test".into(),
+                vec!["recipient@example.test".into()],
+                b"From: Visible Sender <visible@example.test>\r\nTo: recipient@example.test\r\n\r\nBody\r\n".to_vec(),
+            )
+            .await;
+
+        assert_eq!(response, "250 OK");
+        let lookup = api_requests.recv().unwrap();
+        assert!(
+            lookup.contains("query=original%40app.example.test")
+                || lookup.contains("query=original@app.example.test"),
+            "reverse-alias lookup did not receive the inbound envelope sender: {lookup}"
+        );
+        let (envelope, message) = upstream.await.unwrap();
+        assert_eq!(envelope, "MAIL FROM:<upstream@example.test>");
+        assert!(message.contains("From: Visible Sender <upstream@example.test>"));
+        });
+    }
+
+    #[test]
+    fn named_from_is_normalized_to_upstream_identity() {
+        let rewritten = rewrite_message(
+            b"From: Alerts <old@example.test>\r\nTo: recipient@example.test\r\n\r\nBody\r\n",
+            &HashMap::new(),
+            "upstream@example.test",
+        );
+        assert!(String::from_utf8(rewritten)
+            .unwrap()
+            .contains("From: Alerts <upstream@example.test>"));
+    }
+
+    #[test]
+    fn no_from_header_is_not_injected() {
+        let rewritten = rewrite_message(
+            b"To: recipient@example.test\r\nSubject: unchanged\r\n\r\nBody\r\n",
+            &HashMap::new(),
+            "upstream@example.test",
+        );
+        let text = String::from_utf8(rewritten).unwrap();
+        assert!(!text.to_ascii_lowercase().contains("from:"));
+        assert!(text.contains("To: recipient@example.test"));
     }
 
     #[test]
@@ -445,7 +545,7 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("to@example.com".into(), "ra@sl.test".into());
         m.insert("cc@example.com".into(), "rb@sl.test".into());
-        let x=rewrite_message(b"From: sender@test\r\nTo: Person <to@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSubject: test\r\n\r\nbody\r\n",&m);
+        let x=rewrite_message(b"From: sender@test\r\nTo: Person <to@example.com>\r\nCc: cc@example.com\r\nBcc: hidden@example.com\r\nSubject: test\r\n\r\nbody\r\n",&m,"upstream@example.test");
         let s = String::from_utf8(x).unwrap();
         assert!(s.contains("To: Person <ra@sl.test>"));
         assert!(s.contains("Cc: rb@sl.test"));

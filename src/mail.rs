@@ -131,6 +131,23 @@ pub fn replace_addresses(header_value: &str, alias_map: &HashMap<String, String>
     replaced.join(", ")
 }
 
+/// Normalize one valid RFC 5322 mailbox to the authenticated upstream
+/// addr-spec while retaining its display name. Malformed, group, and
+/// multi-mailbox fields return None so callers can preserve their bytes.
+pub fn normalize_from_address(header_value: &str, upstream_addr: &str) -> Option<String> {
+    let parsed = addrparse(header_value).ok()?.into_inner();
+    if parsed.len() != 1 {
+        return None;
+    }
+    match parsed.into_iter().next()? {
+        mailparse::MailAddr::Single(info) => Some(format_addr(
+            &info.display_name.unwrap_or_default(),
+            upstream_addr,
+        )),
+        mailparse::MailAddr::Group(_) => None,
+    }
+}
+
 /// Equivalent of email.utils.parseaddr for a single address-ish string
 /// (used to pull the bare address out of a reverse_alias value, which
 /// may itself be "Name <addr>" or just "addr").
@@ -225,6 +242,30 @@ mod tests {
         let m: HashMap<String, String> = HashMap::new();
         let out = replace_addresses("Dave Jones <dave@example.com>", &m);
         assert_eq!(out, "Dave Jones <dave@example.com>");
+    }
+
+    #[test]
+    fn normalize_from_address_preserves_display_name() {
+        assert_eq!(
+            normalize_from_address("Alerts <old@example.test>", "upstream@example.test"),
+            Some("Alerts <upstream@example.test>".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_bare_from_address_to_upstream_identity() {
+        assert_eq!(
+            normalize_from_address("old@example.test", "upstream@example.test"),
+            Some("upstream@example.test".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_from_address_is_not_normalized() {
+        assert_eq!(
+            normalize_from_address("\"unterminated <old@example.test>", "upstream@example.test"),
+            None
+        );
     }
 
     #[test]

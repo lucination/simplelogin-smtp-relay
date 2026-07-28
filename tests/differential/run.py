@@ -8,6 +8,7 @@ binary against identical in-process mock SimpleLogin and SMTP services.
 import base64, json, os, shutil, smtplib, socket, socketserver, subprocess, sys, tempfile, threading, time
 from email.parser import BytesParser
 from email.policy import SMTP
+from email.utils import formataddr, parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -107,7 +108,11 @@ def smtp_case(port, mail_from, rcpts, message):
   except:pass
 
 def normalized(msg):
- m=BytesParser(policy=SMTP).parsebytes(msg);return {"to":m.get("To"),"cc":m.get("Cc"),"bcc":m.get("Bcc"),"subject":m.get("Subject")}
+ m=BytesParser(policy=SMTP).parsebytes(msg);return {"from":m.get("From"),"to":m.get("To"),"cc":m.get("Cc"),"bcc":m.get("Bcc"),"subject":m.get("Subject")}
+def normalized_rust_from(original,upstream_sender):
+ if original is None:return None
+ display,address=parseaddr(original)
+ return formataddr((display,upstream_sender)) if address else original
 def assert_normal_parity(name,python,rust,inbound_sender,upstream_sender):
  assert python[0]==rust[0],(name,"SMTP response",python[0],rust[0])
  assert len(python[1])==len(rust[1]),(name,"relay count",python[1],rust[1])
@@ -115,7 +120,9 @@ def assert_normal_parity(name,python,rust,inbound_sender,upstream_sender):
   py_sender,py_rcpts,py_headers=py_sent;rs_sender,rs_rcpts,rs_headers=rs_sent
   assert py_sender==inbound_sender,(name,"python envelope sender",py_sender,inbound_sender)
   assert rs_sender==upstream_sender,(name,"rust envelope sender",rs_sender,upstream_sender)
-  assert (py_rcpts,py_headers)==(rs_rcpts,rs_headers),(name,"recipients or headers",py_sent,rs_sent)
+  assert py_rcpts==rs_rcpts,(name,"recipients",py_rcpts,rs_rcpts)
+  assert {k:v for k,v in py_headers.items() if k!="from"}=={k:v for k,v in rs_headers.items() if k!="from"},(name,"non-From headers",py_headers,rs_headers)
+  assert rs_headers["from"]==normalized_rust_from(py_headers["from"],upstream_sender),(name,"documented Rust From normalization",py_headers["from"],rs_headers["from"])
 def run(kind,scenario,api,up):
  SMTPHandler.messages=[];SMTPHandler.delay_data=scenario.get("delay",0);port=free_port();p=start_relay(kind,port,api,up,scenario.get("timeout",3),scenario.get("upstream_timeout",2))
  try:
