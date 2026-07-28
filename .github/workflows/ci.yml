@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/simplelogin-smtp-relay
+  DOCKERHUB_IMAGE: docker.io/${{ github.repository_owner }}/simplelogin-smtp-relay
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -35,27 +39,39 @@ jobs:
       - name: cargo test
         run: cargo test --all --verbose
 
-  docker:
+  # Build each (dockerfile-variant x platform) natively on a matching runner
+  # (native arm64 hardware instead of QEMU emulation) and push a single-arch
+  # image by digest only. The merge job below combines the digests into a
+  # single multi-arch manifest per tag.
+  docker-build:
     needs: build-and-test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - dockerfile: Dockerfile
-            suffix: ""
+            variant: standard
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - dockerfile: Dockerfile
+            variant: standard
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
           - dockerfile: Dockerfile.alpine
-            suffix: "-alpine"
+            variant: alpine
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - dockerfile: Dockerfile.alpine
+            variant: alpine
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -67,30 +83,140 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
-        id: tags
-        shell: bash
-        run: |
-          repo="ghcr.io/${{ github.repository_owner }}/simplelogin-smtp-relay"
-          suffix="${{ matrix.suffix }}"
-          if [ -z "$suffix" ]; then
-            latest_tag="${repo}:latest"
-          else
-            latest_tag="${repo}:alpine"
-          fi
-          sha_tag="${repo}:${{ github.sha }}${suffix}"
-          {
-            echo "tags<<EOF"
-            echo "$latest_tag"
-            echo "$sha_tag"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image (${{ matrix.dockerfile }})
+      - name: Prepare platform pair slug
+        id: platform_pair
+        shell: bash
+        run: echo "pair=${{ matrix.variant }}-$(echo ${{ matrix.platform }} | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image by digest (${{ matrix.dockerfile }}, ${{ matrix.platform }})
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          # Push by digest only (no floating tags yet) to both registries;
+          # outputs id-based manifests we merge into a single multi-arch tag later.
+          outputs: |
+            type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+            type=image,name=${{ env.DOCKERHUB_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.platform_pair.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-merge:
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            variant: standard
+            suffix: ""
+          - dockerfile: Dockerfile.alpine
+            variant: alpine
+            suffix: "-alpine"
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        shell: bash
+        run: |
+          suffix="${{ matrix.suffix }}"
+          if [ -z "$suffix" ]; then
+            floating_tag="latest"
+          else
+            floating_tag="alpine"
+          fi
+          {
+            echo "ghcr_tags<<EOF"
+            echo "${{ env.GHCR_IMAGE }}:${floating_tag}"
+            echo "${{ env.GHCR_IMAGE }}:${{ github.sha }}${suffix}"
+            echo "EOF"
+            echo "dockerhub_tags<<EOF"
+            echo "${{ env.DOCKERHUB_IMAGE }}:${floating_tag}"
+            echo "${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }}${suffix}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create multi-arch manifest (GHCR)
+        working-directory: /tmp/digests
+        shell: bash
+        run: |
+          tag_args=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && tag_args+=(-t "$t")
+          done <<< "${{ steps.tags.outputs.ghcr_tags }}"
+          digest_args=()
+          for f in *; do
+            digest_args+=("${{ env.GHCR_IMAGE }}@sha256:${f}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+
+      - name: Create multi-arch manifest (Docker Hub)
+        working-directory: /tmp/digests
+        shell: bash
+        run: |
+          tag_args=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && tag_args+=(-t "$t")
+          done <<< "${{ steps.tags.outputs.dockerhub_tags }}"
+          digest_args=()
+          for f in *; do
+            digest_args+=("${{ env.DOCKERHUB_IMAGE }}@sha256:${f}")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+
+      - name: Inspect GHCR manifest
+        run: docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:${{ (matrix.suffix == '' && 'latest') || 'alpine' }}
+
+      - name: Inspect Docker Hub manifest
+        run: docker buildx imagetools inspect ${{ env.DOCKERHUB_IMAGE }}:${{ (matrix.suffix == '' && 'latest') || 'alpine' }}
