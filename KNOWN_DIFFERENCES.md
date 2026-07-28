@@ -12,7 +12,7 @@ the inbound envelope sender upstream.
 
 ## `DATA_TIMEOUT` enforcement under a slow-but-completing upstream
 
-**Scenario:** upstream SMTP server accepts the `DATA` payload but delays its final `250` response beyond `DATA_TIMEOUT` before eventually responding successfully.
+**Scenario:** upstream SMTP server accepts the `DATA` payload but delays its final `250` response beyond `DATA_TIMEOUT` before eventually responding successfully. The differential fixture uses a two-second response delay, a one-second `DATA_TIMEOUT`, and a five-second upstream socket timeout, so the observation cannot be confused with an upstream socket timeout.
 
 - **Python original:** replies `250 OK` — the timeout does **not** fire.
 - **Rust reimplementation:** replies `451 Timeout processing mail` — the timeout **does** fire, as documented in the spec (`DATA_TIMEOUT wraps processing with "451 Timeout processing mail" / "451 Internal error" on failure`).
@@ -21,4 +21,4 @@ the inbound envelope sender upstream.
 
 **Why we don't reproduce the bug:** the environment variable's name, default, and documented purpose ("`DATA_TIMEOUT` wraps processing... `451 Timeout processing mail`... on failure") describe intended behavior that only the Rust reimplementation actually delivers. The Rust port runs the equivalent blocking work inside `tokio::task::spawn_blocking`, wrapped by a real `tokio::time::timeout`, so a slow upstream is genuinely preempted at the timeout boundary. Silently copying the original's non-functional timeout would be reproducing a bug, not a feature, and would leave `DATA_TIMEOUT` meaningless in the Rust build as well — considered a worse outcome than a documented, deliberate improvement.
 
-This is the **only** known divergence; every other scenario in the differential harness (plain `To`, multiple `To`, `To`+`Cc` with display names, unmapped/unknown addresses, `Bcc` stripping, alias-not-found error, no-reverse-alias error) passes with byte-identical SMTP response codes and relayed message/recipient content between the two implementations.
+Aside from these documented differences, every other scenario in the differential harness (plain `To`, multiple `To`, `To`+`Cc` with display names, unmapped/unknown addresses, `Bcc` stripping, alias-not-found error, no-reverse-alias error) passes with identical SMTP response codes and relayed recipient/message-header content. The harness explicitly checks the intentionally different upstream envelope senders rather than treating them as a parity failure.

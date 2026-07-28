@@ -36,8 +36,11 @@ class API(BaseHTTPRequestHandler):
   else: self._json({"reverse_alias":"unknown@simplelogin.test"})
 
 class SMTPHandler(socketserver.StreamRequestHandler):
- messages=[]; delay_data=False
- def put(self,s): self.wfile.write((s+"\r\n").encode());self.wfile.flush()
+ messages=[]; delay_data=0
+ def put(self,s):
+  try:
+   self.wfile.write((s+"\r\n").encode());self.wfile.flush();return True
+  except (ConnectionResetError, BrokenPipeError, OSError): return False
  def handle(self):
   self.put("220 mock upstream")
   sender=None;rcpts=[]
@@ -61,8 +64,9 @@ class SMTPHandler(socketserver.StreamRequestHandler):
      if x in (b".\r\n",b".\n",b""):break
      if x.startswith(b".."):x=x[1:]
      data+=x
-    if self.delay_data: time.sleep(2)
-    self.messages.append((sender,rcpts,data));self.put("250 OK")
+    if self.delay_data: time.sleep(self.delay_data)
+    self.messages.append((sender,rcpts,data))
+    if not self.put("250 OK"): return
    elif up=="QUIT":self.put("221 Bye");return
    elif up=="STARTTLS":self.put("454 TLS unavailable")
    else:self.put("500 bad")
@@ -79,11 +83,11 @@ def wait(port):
 def start(cls,port):
  s=socketserver.ThreadingTCPServer(("127.0.0.1",port),cls);s.daemon_threads=True;threading.Thread(target=s.serve_forever,daemon=True).start();return s
 
-def env(relay,api,upstream,timeout=3):
- e=os.environ.copy();e.update({"RELAY_HOST":"127.0.0.1","RELAY_PORT":str(relay),"RELAY_USERNAME":"relay","RELAY_PASSWORD":"secret","SL_API_URL":api,"SL_API_KEY":"test-key","UPSTREAM_HOST":"127.0.0.1","UPSTREAM_PORT":str(upstream),"UPSTREAM_USERNAME":"up","UPSTREAM_PASSWORD":"up-pass","UPSTREAM_STARTTLS":"false","DATA_TIMEOUT":str(timeout),"UPSTREAM_TIMEOUT":"2","LOG_LEVEL":"ERROR"});return e
+def env(relay,api,upstream,timeout=3,upstream_timeout=2):
+ e=os.environ.copy();e.update({"RELAY_HOST":"127.0.0.1","RELAY_PORT":str(relay),"RELAY_USERNAME":"relay","RELAY_PASSWORD":"secret","SL_API_URL":api,"SL_API_KEY":"test-key","UPSTREAM_HOST":"127.0.0.1","UPSTREAM_PORT":str(upstream),"UPSTREAM_USERNAME":"up","UPSTREAM_PASSWORD":"up-pass","UPSTREAM_STARTTLS":"false","DATA_TIMEOUT":str(timeout),"UPSTREAM_TIMEOUT":str(upstream_timeout),"LOG_LEVEL":"ERROR"});return e
 
-def start_relay(kind,relay,api,up,timeout=3):
- e=env(relay,api,up,timeout)
+def start_relay(kind,relay,api,up,timeout=3,upstream_timeout=2):
+ e=env(relay,api,up,timeout,upstream_timeout)
  if kind=="python": cmd=[sys.executable,"server.py"];cwd=ORIG
  else: cmd=[str(ROOT/"target"/"debug"/"smtp-relay")];cwd=ROOT
  p=subprocess.Popen(cmd,cwd=cwd,env=e,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -104,14 +108,25 @@ def smtp_case(port, mail_from, rcpts, message):
 
 def normalized(msg):
  m=BytesParser(policy=SMTP).parsebytes(msg);return {"to":m.get("To"),"cc":m.get("Cc"),"bcc":m.get("Bcc"),"subject":m.get("Subject")}
+def assert_normal_parity(name,python,rust,inbound_sender,upstream_sender):
+ assert python[0]==rust[0],(name,"SMTP response",python[0],rust[0])
+ assert len(python[1])==len(rust[1]),(name,"relay count",python[1],rust[1])
+ for py_sent,rs_sent in zip(python[1],rust[1]):
+  py_sender,py_rcpts,py_headers=py_sent;rs_sender,rs_rcpts,rs_headers=rs_sent
+  assert py_sender==inbound_sender,(name,"python envelope sender",py_sender,inbound_sender)
+  assert rs_sender==upstream_sender,(name,"rust envelope sender",rs_sender,upstream_sender)
+  assert (py_rcpts,py_headers)==(rs_rcpts,rs_headers),(name,"recipients or headers",py_sent,rs_sent)
 def run(kind,scenario,api,up):
- SMTPHandler.messages=[];port=free_port();p=start_relay(kind,port,api,up,scenario.get("timeout",3))
+ SMTPHandler.messages=[];SMTPHandler.delay_data=scenario.get("delay",0);port=free_port();p=start_relay(kind,port,api,up,scenario.get("timeout",3),scenario.get("upstream_timeout",2))
  try:
   response=smtp_case(port,scenario["from"],scenario["rcpts"],scenario["msg"])
   time.sleep(0.15)
   sent=[(a,b,normalized(c)) for a,b,c in SMTPHandler.messages]
   return response,sent
- finally:p.terminate();p.wait(timeout=5)
+ finally:
+  p.terminate();p.wait(timeout=5);SMTPHandler.delay_data=0
+def slow_upstream_scenario():
+ return {"from":"alias@example.com","rcpts":["a@example.com"],"msg":b"To: a@example.com\r\n\r\ntimeout\r\n","timeout":1,"delay":2,"upstream_timeout":5}
 def main():
  if not ORIG.exists():
   subprocess.run(["git","clone","--depth","1","https://github.com/Hoshinowo-Yuki/simple-login-smtp-relay.git",str(ORIG)],check=True,stdout=subprocess.DEVNULL)
@@ -126,7 +141,7 @@ def main():
  passed=0
  for name,s in scenarios:
   py=run("python",s,api_url,up_port);rs=run("rust",s,api_url,up_port)
-  assert py==rs,(name,py,rs)
+  assert_normal_parity(name,py,rs,s["from"],"up")
   print(f"PASS {name}: response={py[0][0]} relays={len(py[1])}");passed+=1
  # Timeout: the Python original's handle_DATA wraps a fully synchronous
  # _process() (blocking requests/smtplib calls, no `await` inside) in
@@ -140,8 +155,8 @@ def main():
  # actually enforced. See KNOWN_DIFFERENCES.md. We assert the ACTUAL
  # (divergent) behavior of each implementation here rather than pretend they
  # agree.
- SMTPHandler.delay_data=True;s={"from":"alias@example.com","rcpts":["a@example.com"],"msg":b"To: a@example.com\r\n\r\ntimeout\r\n","timeout":1}
- py=run("python",s,api_url,up_port);rs=run("rust",s,api_url,up_port);SMTPHandler.delay_data=False
+ s=slow_upstream_scenario()
+ py=run("python",s,api_url,up_port);rs=run("rust",s,api_url,up_port)
  assert py[0][0]==250,("python original did not relay through the slow-upstream case as expected",py)
  assert rs[0][0]==451,("rust DATA_TIMEOUT did not fire as expected",rs)
  print("PASS upstream_timeout_via_DATA_TIMEOUT (documented divergence, see KNOWN_DIFFERENCES.md): python=250 (asyncio.wait_for can't preempt sync blocking I/O) rust=451 (real timeout enforced)");passed+=1

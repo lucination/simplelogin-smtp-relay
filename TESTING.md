@@ -87,7 +87,7 @@ Note: local `arm64` builds run under QEMU emulation and are significantly slower
 `tests/differential/run.py` is a **live** parity test: it clones the actual [Hoshinowo-Yuki/simple-login-smtp-relay](https://github.com/Hoshinowo-Yuki/simple-login-smtp-relay) Python original into `.differential-original/`, spins up an in-process mock SimpleLogin API and a mock upstream SMTP server, then runs identical SMTP scenarios through **both** the Python original (`server.py`) and the Rust binary (`target/debug/smtp-relay`), and diffs:
 
 - The final SMTP response code returned to the client.
-- The exact envelope (`MAIL FROM` / `RCPT TO` order) and rewritten message headers (`To`/`Cc`/`Bcc`/`Subject`) captured by the mock upstream.
+- The upstream envelope sender expected for each implementation, `RCPT TO` order, and rewritten message headers (`To`/`Cc`/`Bcc`/`Subject`) captured by the mock upstream. The Python original is checked against the inbound sender; Rust is checked against `UPSTREAM_USERNAME`.
 
 ### Requirements
 
@@ -99,6 +99,7 @@ Note: local `arm64` builds run under QEMU emulation and are significantly slower
 
 ```bash
 cargo build
+python3 tests/differential/test_run.py
 python3 tests/differential/run.py
 ```
 
@@ -111,7 +112,7 @@ python3 tests/differential/run.py
 | `to_cc_display_bcc` | `To`+`Cc` with display names, an unmapped address left untouched, `Bcc` stripped |
 | `alias_not_found` | Sender has no matching SimpleLogin alias → `451` |
 | `no_reverse_alias` | SimpleLogin returns no `reverse_alias` for a recipient → `451` |
-| `upstream_timeout_via_DATA_TIMEOUT` | Slow upstream response beyond `DATA_TIMEOUT`; **documented divergence**, see below |
+| `upstream_timeout_via_DATA_TIMEOUT` | Slow upstream response beyond `DATA_TIMEOUT` while its socket timeout remains higher; **documented divergence**, see below |
 
 ### Result (real output from a live run against a freshly cloned original)
 
@@ -125,6 +126,6 @@ PASS upstream_timeout_via_DATA_TIMEOUT (documented divergence, see KNOWN_DIFFERE
 Differential parity PASS: 6/6 scenarios
 ```
 
-The `upstream_timeout_via_DATA_TIMEOUT` scenario is an intentional, documented divergence — not a harness bug and not a Rust bug. See [`KNOWN_DIFFERENCES.md`](KNOWN_DIFFERENCES.md) for full root-cause analysis: the Python original's `asyncio.wait_for` can never actually preempt its fully-synchronous, non-`await`-ing `_process()` body, so `DATA_TIMEOUT` is effectively inert against slow blocking I/O there, whereas the Rust port enforces it for real via `spawn_blocking` + `tokio::time::timeout`.
+The `upstream_timeout_via_DATA_TIMEOUT` scenario is an intentional, documented divergence — not a harness bug and not a Rust bug. Its fixture holds the upstream socket timeout above the delayed response, so it tests `DATA_TIMEOUT` rather than a socket-timeout race. See [`KNOWN_DIFFERENCES.md`](KNOWN_DIFFERENCES.md) for full root-cause analysis: the Python original's `asyncio.wait_for` can never actually preempt its fully-synchronous, non-`await`-ing `_process()` body, so `DATA_TIMEOUT` is effectively inert against slow blocking I/O there, whereas the Rust port enforces it for real via `spawn_blocking` + `tokio::time::timeout`.
 
-Every other scenario passes with byte-identical response codes and relayed content.
+Every other scenario passes with identical response codes plus identical relayed recipient and message-header content; the harness separately verifies each implementation's documented envelope sender.
