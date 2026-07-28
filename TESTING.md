@@ -33,7 +33,7 @@ test mail::tests::unmapped_with_display_name_left_alone ... ok
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-Covers: SMTP AUTH LOGIN/PLAIN decoding & credential validation; env parsing/defaults/validation; header address parsing/replacement (`To`/`Cc` rewriting, display-name preservation, unmapped-address passthrough), and `Bcc` stripping; mock-upstream verification that the upstream authenticated identity is used as the envelope sender while the RFC 5322 `From` header remains unchanged; and sanitized single-line upstream SMTP error responses.
+Covers: SMTP AUTH LOGIN/PLAIN decoding & credential validation; env parsing/defaults/validation; header address parsing/replacement (`To`/`Cc` rewriting, display-name preservation, unmapped-address passthrough), and `Bcc` stripping; RFC 5322 `From` normalization to `UPSTREAM_USERNAME` for named and bare addresses, with malformed values retained and no header injected when absent; mock-upstream verification that both the upstream envelope sender and visible `From` use the authenticated identity while the original display name is preserved; and sanitized single-line upstream SMTP error responses.
 
 ## Docker image testing
 
@@ -87,7 +87,7 @@ Note: local `arm64` builds run under QEMU emulation and are significantly slower
 `tests/differential/run.py` is a **live** parity test: it clones the actual [Hoshinowo-Yuki/simple-login-smtp-relay](https://github.com/Hoshinowo-Yuki/simple-login-smtp-relay) Python original into `.differential-original/`, spins up an in-process mock SimpleLogin API and a mock upstream SMTP server, then runs identical SMTP scenarios through **both** the Python original (`server.py`) and the Rust binary (`target/debug/smtp-relay`), and diffs:
 
 - The final SMTP response code returned to the client.
-- The upstream envelope sender expected for each implementation, `RCPT TO` order, and rewritten message headers (`To`/`Cc`/`Bcc`/`Subject`) captured by the mock upstream. The Python original is checked against the inbound sender; Rust is checked against `UPSTREAM_USERNAME`.
+- The upstream envelope sender expected for each implementation, `RCPT TO` order, and rewritten message headers. `To`/`Cc`/`Bcc`/`Subject` must match exactly; Python is checked against the inbound envelope sender while Rust is checked against `UPSTREAM_USERNAME`. The harness explicitly asserts Rust's documented visible-`From` normalization instead of claiming parity for that field.
 
 ### Requirements
 
@@ -107,7 +107,8 @@ python3 tests/differential/run.py
 
 | Scenario | What it checks |
 |---|---|
-| `plain_to` | Single `To` address is rewritten to its reverse alias |
+| `plain_to` | Single `To` address is rewritten to its reverse alias; bare `From` normalization is asserted for Rust |
+| `named_from` | Named `From` retains its display name while Rust replaces only its addr-spec with `UPSTREAM_USERNAME` |
 | `multiple_to` | Multiple `To` addresses, all rewritten, envelope order preserved |
 | `to_cc_display_bcc` | `To`+`Cc` with display names, an unmapped address left untouched, `Bcc` stripped |
 | `alias_not_found` | Sender has no matching SimpleLogin alias → `451` |
@@ -128,4 +129,4 @@ Differential parity PASS: 6/6 scenarios
 
 The `upstream_timeout_via_DATA_TIMEOUT` scenario is an intentional, documented divergence — not a harness bug and not a Rust bug. Its fixture holds the upstream socket timeout above the delayed response, so it tests `DATA_TIMEOUT` rather than a socket-timeout race. See [`KNOWN_DIFFERENCES.md`](KNOWN_DIFFERENCES.md) for full root-cause analysis: the Python original's `asyncio.wait_for` can never actually preempt its fully-synchronous, non-`await`-ing `_process()` body, so `DATA_TIMEOUT` is effectively inert against slow blocking I/O there, whereas the Rust port enforces it for real via `spawn_blocking` + `tokio::time::timeout`.
 
-Every other scenario passes with identical response codes plus identical relayed recipient and message-header content; the harness separately verifies each implementation's documented envelope sender.
+Every other scenario passes with identical response codes plus identical relayed recipients and non-`From` message headers. The harness separately verifies the documented envelope-sender and visible-`From` differences.

@@ -2,13 +2,20 @@
 
 Goal: zero unintentional behavioral differences. This file lists deliberate divergences from the Python original.
 
-## Upstream envelope sender
+## Upstream envelope sender and visible `From`
 
-The relay always uses `UPSTREAM_USERNAME` as the upstream SMTP `MAIL FROM`
-identity. The RFC 5322 message headers, including `From`, are not changed.
+The relay always uses `UPSTREAM_USERNAME` as both the upstream SMTP `MAIL FROM`
+identity and the addr-spec in every parseable RFC 5322 `From` header. A
+pre-existing display name is retained (for example, `Alerts <old@example.test>`
+becomes `Alerts <UPSTREAM_USERNAME>`). This is unconditional and has no
+configuration override.
 
-This deliberately differs from the reference implementation, which forwards
-the inbound envelope sender upstream.
+If a message has no `From`, the relay does not add one. If an existing `From`
+is malformed, a group, or contains multiple mailboxes, it is left unchanged to
+avoid inventing or ambiguously rewriting an invalid header.
+
+This deliberately differs from the Python reference implementation, which
+forwards the inbound envelope sender and preserves the visible `From` header.
 
 ## `DATA_TIMEOUT` enforcement under a slow-but-completing upstream
 
@@ -21,4 +28,4 @@ the inbound envelope sender upstream.
 
 **Why we don't reproduce the bug:** the environment variable's name, default, and documented purpose ("`DATA_TIMEOUT` wraps processing... `451 Timeout processing mail`... on failure") describe intended behavior that only the Rust reimplementation actually delivers. The Rust port runs the equivalent blocking work inside `tokio::task::spawn_blocking`, wrapped by a real `tokio::time::timeout`, so a slow upstream is genuinely preempted at the timeout boundary. Silently copying the original's non-functional timeout would be reproducing a bug, not a feature, and would leave `DATA_TIMEOUT` meaningless in the Rust build as well — considered a worse outcome than a documented, deliberate improvement.
 
-Aside from these documented differences, every other scenario in the differential harness (plain `To`, multiple `To`, `To`+`Cc` with display names, unmapped/unknown addresses, `Bcc` stripping, alias-not-found error, no-reverse-alias error) passes with identical SMTP response codes and relayed recipient/message-header content. The harness explicitly checks the intentionally different upstream envelope senders rather than treating them as a parity failure.
+Aside from these documented differences, every other scenario in the differential harness (plain `To`, named `From`, multiple `To`, `To`+`Cc` with display names, unmapped/unknown addresses, `Bcc` stripping, alias-not-found error, no-reverse-alias error) passes with identical SMTP response codes and relayed recipients plus non-`From` message-header content. The harness explicitly checks the intentionally different upstream envelope senders and Rust-visible `From` normalization rather than treating either as parity failures.

@@ -22,16 +22,21 @@ class BrokenWriter:
 
 
 class DifferentialFixtureTests(unittest.TestCase):
-    def test_normal_parity_compares_recipients_and_headers_not_intentional_sender_difference(self):
-        headers = {"to": "rev-a@simplelogin.test", "cc": None, "bcc": None, "subject": "one"}
+    def test_normal_parity_compares_recipients_and_non_from_headers_while_asserting_documented_from_normalization(self):
+        headers = {"from": "Alerts <old@example.test>", "to": "rev-a@simplelogin.test", "cc": None, "bcc": None, "subject": "one"}
         python = ((250, {}), [("alias@example.com", ["rev-a@simplelogin.test"], headers)])
-        rust = ((250, {}), [("up", ["rev-a@simplelogin.test"], headers)])
+        rust_headers = dict(headers, **{"from": "Alerts <up>"})
+        rust = ((250, {}), [("up", ["rev-a@simplelogin.test"], rust_headers)])
         run.assert_normal_parity("example", python, rust, "alias@example.com", "up")
 
-        changed_headers = dict(headers, subject="different")
+        changed_headers = dict(rust_headers, subject="different")
         changed_rust = ((250, {}), [("up", ["rev-a@simplelogin.test"], changed_headers)])
         with self.assertRaises(AssertionError):
             run.assert_normal_parity("example", python, changed_rust, "alias@example.com", "up")
+
+        unchanged_from = ((250, {}), [("up", ["rev-a@simplelogin.test"], headers)])
+        with self.assertRaises(AssertionError):
+            run.assert_normal_parity("example", python, unchanged_from, "alias@example.com", "up")
 
     def test_slow_upstream_fixture_exceeds_data_timeout_but_not_socket_timeout(self):
         scenario = run.slow_upstream_scenario()
