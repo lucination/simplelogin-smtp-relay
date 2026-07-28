@@ -140,6 +140,7 @@ def main():
  api_port,up_port=free_port(),free_port();api=start(API,api_port);up=start(SMTPHandler,up_port);api_url=f"http://127.0.0.1:{api_port}"
  scenarios=[
   ("plain_to",{"from":"alias@example.com","rcpts":["a@example.com"],"msg":b"From: alias@example.com\r\nTo: a@example.com\r\nSubject: one\r\n\r\nbody\r\n"}),
+  ("named_from",{"from":"alias@example.com","rcpts":["a@example.com"],"msg":b"From: Alerts <old@example.test>\r\nTo: a@example.com\r\nSubject: named\r\n\r\nbody\r\n"}),
   ("multiple_to",{"from":"alias@example.com","rcpts":["a@example.com","b@example.com"],"msg":b"From: alias@example.com\r\nTo: a@example.com, b@example.com\r\nSubject: two\r\n\r\nbody\r\n"}),
   ("to_cc_display_bcc",{"from":"alias@example.com","rcpts":["a@example.com","b@example.com","c@example.com"],"msg":b"From: alias@example.com\r\nTo: Alice A <a@example.com>, unknown@example.com\r\nCc: Bee <b@example.com>, c@example.com\r\nBcc: hidden@example.com\r\nSubject: three\r\n\r\nbody\r\n"}),
   ("alias_not_found",{"from":"missing@example.com","rcpts":["a@example.com"],"msg":b"To: a@example.com\r\nSubject: bad\r\n\r\nx\r\n"}),
