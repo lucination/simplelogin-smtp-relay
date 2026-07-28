@@ -1,0 +1,13 @@
+services:
+  smtp-relay:
+    build: .
+    image: simplelogin-smtp-relay:latest
+    container_name: simplelogin-smtp-relay
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+    env_file:
+      - .env
+    environment:
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 8025
