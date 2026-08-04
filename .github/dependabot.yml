@@ -1,0 +1,45 @@
+# Dependabot keeps the SMTP relay's dependencies current. Each group opens at
+# most one PR per schedule run, so dependency updates stay reviewable without
+# PR flood. Merging any of these PRs triggers the existing CI workflow, which
+# rebuilds and republishes the multi-arch images to GHCR and Docker Hub.
+#
+# Base-image drift on floating tags (rust:1-slim-bookworm, bookworm-slim,
+# alpine:latest) is additionally covered by the weekly scheduled rebuild in
+# .github/workflows/ci.yml, which runs even when no PR has merged.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    groups:
+      crates:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+    groups:
+      base-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"

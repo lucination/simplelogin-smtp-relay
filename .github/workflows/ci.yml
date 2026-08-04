@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly rebuild (Mon 05:17 UTC): refresh the floating base-image tags
+    # (rust:1-slim-bookworm, rust:1-alpine, bookworm-slim, alpine:latest) and
+    # republish images even when no code changed. Crate updates arrive via
+    # Dependabot PRs (see .github/dependabot.yml), which trigger this workflow
+    # on merge.
+    - cron: '17 5 * * 1'
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/simplelogin-smtp-relay
@@ -45,7 +52,7 @@ jobs:
   # single multi-arch manifest per tag.
   docker-build:
     needs: build-and-test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -148,7 +155,7 @@ jobs:
 
   docker-merge:
     needs: docker-build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
