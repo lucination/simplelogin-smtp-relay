@@ -1,15 +1,20 @@
 # Auto-merge Dependabot PRs once CI is green. This is the pattern from
 # GitHub's official "Automating Dependabot with GitHub Actions" tutorial:
-# run on pull_request_target, act ONLY when the author is dependabot[bot],
-# approve the PR, then enable auto-merge. Auto-merge itself waits for all
+# run on pull_request_target, act ONLY when the PR author is
+# dependabot[bot], then enable auto-merge. Auto-merge itself waits for all
 # status checks (build-and-test: fmt + check + test) to pass before merging.
+#
+# No approval step: GitHub forbids the Actions token from approving PRs
+# ("GitHub Actions is not permitted to approve pull requests"), and this
+# repo has no branch protection requiring reviews anyway.
 #
 # Security notes (kept fail-closed):
 # - pull_request_target runs with the base branch's token; we never check
 #   out or execute PR code, so a malicious PR cannot inject steps. The only
-#   actions are gh CLI calls against the API.
-# - The actor guard (github.actor == 'dependabot[bot]') is mandatory: it
-#   must never be relaxed to labels or titles, which are user-controlled.
+#   action is a gh CLI call against the API.
+# - The author guard (github.event.pull_request.user.login ==
+#   'dependabot[bot]') is mandatory: it must never be relaxed to labels or
+#   titles, which are user-controlled.
 # - GITHUB_TOKEN has no access to repo secrets, so nothing here can leak them.
 #
 # Requires the repo setting "Allow auto-merge" (enabled via API when this
@@ -31,12 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
-      - name: Approve Dependabot PR
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Enable auto-merge
         run: gh pr merge --auto --squash "$PR_URL"
         env:
