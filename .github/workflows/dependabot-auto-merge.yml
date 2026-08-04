@@ -30,6 +30,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write # dispatch the post-merge CI rebuild
 
 jobs:
   dependabot:
@@ -40,4 +41,27 @@ jobs:
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub does not fire push events for merge commits attributed to
+      # Dependabot, so the merged result would otherwise never trigger the
+      # image rebuild. Wait for the merge to land, then dispatch CI on main
+      # explicitly. The weekly schedule remains the backstop if anything here
+      # fails.
+      - name: Wait for auto-merge
+        run: |
+          for i in $(seq 1 90); do
+            state="$(gh pr view "$PR_URL" --json state --jq .state)"
+            [ "$state" = "MERGED" ] && exit 0
+            sleep 20
+          done
+          echo "PR did not merge within 30 minutes; the weekly schedule will pick up the rebuild." >&2
+          exit 1
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch post-merge rebuild
+        run: gh workflow run ci.yml --ref main
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
