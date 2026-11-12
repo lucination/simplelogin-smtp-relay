@@ -158,11 +158,11 @@ mod tests {
         let c = Config::from_env();
         assert_eq!(c.relay_host, "0.0.0.0");
         assert_eq!(c.relay_port, 8025);
-        assert_eq!(c.tls_enabled, false);
+        assert!(!c.tls_enabled);
         assert_eq!(c.sl_api_url, "https://app.simplelogin.io");
         assert_eq!(c.upstream_host, "smtp.gmail.com");
         assert_eq!(c.upstream_port, 587);
-        assert_eq!(c.upstream_starttls, true);
+        assert!(c.upstream_starttls);
         assert_eq!(c.data_timeout, 30);
         assert_eq!(c.upstream_timeout, 15);
         assert_eq!(c.log_level, "INFO");

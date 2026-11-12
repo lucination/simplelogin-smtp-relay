@@ -1,5 +1,5 @@
 # --- build stage ---
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1-slim-trixie AS builder
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,11 +11,11 @@ COPY src ./src
 RUN cargo build --release --locked
 
 # --- runtime stage ---
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
+    ca-certificates libssl3t64 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home --uid 10001 relay
 

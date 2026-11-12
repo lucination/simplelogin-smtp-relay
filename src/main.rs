@@ -171,11 +171,11 @@ async fn serve_tcp(
         };
         let line = buf.trim_end_matches(['\r', '\n']);
         let upper = line.to_uppercase();
-        if upper == "STARTTLS" && tls.is_some() {
+        if let ("STARTTLS", Some(acceptor)) = (upper.as_str(), tls.as_ref()) {
             send(&mut writer, "220 Ready to start TLS").await?;
             let r = reader.into_inner();
             let w = writer.reunite(r)?;
-            let encrypted = tls.unwrap().accept(w).await?;
+            let encrypted = acceptor.accept(w).await?;
             return serve_session(encrypted, c, h, true).await;
         }
         if upper.starts_with("EHLO") || upper.starts_with("HELO") {
